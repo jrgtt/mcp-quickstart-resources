@@ -1,8 +1,5 @@
-import { Anthropic } from "@anthropic-ai/sdk";
-import {
-  MessageParam,
-  Tool,
-} from "@anthropic-ai/sdk/resources/messages/messages.mjs";
+import { OpenAI } from "openai";
+import { EasyInputMessage, FunctionTool } from "openai/resources/responses/responses";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -12,21 +9,21 @@ import dotenv from "dotenv";
 
 dotenv.config(); // load environment variables from .env
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) {
-  throw new Error("ANTHROPIC_API_KEY is not set");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_API_KEY) {
+  throw new Error("OPENAI_API_KEY is not set");
 }
 
 class MCPClient {
   private mcp: Client;
-  private anthropic: Anthropic;
   private transport: StdioClientTransport | null = null;
-  private tools: Tool[] = [];
+  private openai: OpenAI;
+  private tools: FunctionTool[] = [];
 
   constructor() {
-    // Initialize Anthropic client and MCP client
-    this.anthropic = new Anthropic({
-      apiKey: ANTHROPIC_API_KEY,
+    // Initialize OpenAI client and MCP client
+    this.openai = new OpenAI({
+      apiKey: OPENAI_API_KEY,
     });
     this.mcp = new Client({ name: "mcp-client-cli", version: "1.0.0" });
   }
@@ -63,7 +60,9 @@ class MCPClient {
         return {
           name: tool.name,
           description: tool.description,
-          input_schema: tool.inputSchema,
+          parameters: tool.inputSchema,
+          type: "function",
+          strict: false
         };
       });
       console.log(
@@ -78,36 +77,34 @@ class MCPClient {
 
   async processQuery(query: string) {
     /**
-     * Process a query using Claude and available tools
+     * Process a query using the LLM and available tools
      *
      * @param query - The user's input query
      * @returns Processed response as a string
      */
-    const messages: MessageParam[] = [
+    const input: EasyInputMessage[] = [
       {
         role: "user",
         content: query,
       },
     ];
 
-    // Initial Claude API call
-    const response = await this.anthropic.messages.create({
-      model: "claude-3-5-sonnet-20241022",
-      max_tokens: 1000,
-      messages,
-      tools: this.tools,
+    const response = await this.openai.responses.create({
+      input,
+      model: "gpt-4o",
+      tools: this.tools
     });
 
     // Process response and handle tool calls
     const finalText = [];
 
-    for (const content of response.content) {
-      if (content.type === "text") {
-        finalText.push(content.text);
-      } else if (content.type === "tool_use") {
+    for (const output of response.output) {
+      if (output.type === "message") {
+        finalText.push(response.output_text);
+      } else if (output.type === "function_call") {
         // Execute tool call
-        const toolName = content.name;
-        const toolArgs = content.input as { [x: string]: unknown } | undefined;
+        const toolName = output.name;
+        const toolArgs = JSON.parse(output.arguments) as { [x: string]: unknown } | undefined;
 
         const result = await this.mcp.callTool({
           name: toolName,
@@ -118,21 +115,18 @@ class MCPClient {
         );
 
         // Continue conversation with tool results
-        messages.push({
+        input.push({
           role: "user",
-          content: result.content as string,
+          content: (result.content as [{ text: string }]).map(({ text }) => text).join("")
         });
 
-        // Get next response from Claude
-        const response = await this.anthropic.messages.create({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 1000,
-          messages,
+        // Get next response from OpenAI
+        const response = await this.openai.responses.create({
+          input,
+          model: "gpt-4o",
         });
 
-        finalText.push(
-          response.content[0].type === "text" ? response.content[0].text : "",
-        );
+        finalText.push(response.output_text);
       }
     }
 
@@ -178,6 +172,7 @@ async function main() {
     console.log("Usage: node build/index.js <path_to_server_script>");
     return;
   }
+
   const mcpClient = new MCPClient();
   try {
     await mcpClient.connectToServer(process.argv[2]);
